@@ -67,9 +67,14 @@ executable narvis
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.18.3.0, text, discord-haskell, dotenv, tls < 2.0
 
-    -- Directories containing source files.
+    build-depends: base >= 4.18 && < 4.20, text, discord-haskell, dotenv, tls >= 1.6 && < 3.0, x509 >= 1.7 && < 1.8, x509-store >= 1.6 && < 1.7, x509-system >= 1.6 && < 1.7, x509-validation >= 1.6 && < 1.7
+      , ihp-openai
+      , containers
+      , wreq
+      , aeson
+      , bytestring, lens
+
     hs-source-dirs:   src
 
     -- Base language which the package is written in.
