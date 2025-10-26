@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
-import           Control.Monad (unless, when, void)
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use if" #-}
+import           Control.Monad (unless, void, guard)
 import           Control.Monad.IO.Class (liftIO)
 import           Data.Text (Text, pack)
 import qualified Data.Text.IO as TIO
@@ -20,8 +22,11 @@ import           Network.Wreq
 import           Control.Lens ((^.), (.~), (&))
 import qualified Data.ByteString.Char8 as BS
 import           Data.Aeson (FromJSON(..), (.:), (.=), Value(..), object, withObject, eitherDecode)
+import           Control.Monad.Trans.Maybe (MaybeT(..))
+import           Control.Monad.Trans (lift)
+import           Control.Applicative ((<|>))
+import           Embed (findUrlAndGetEmbed)
 
-import          Embed (findUrlAndGetEmbed)
 
 data Msg = Msg {
     msgId   :: MessageId,
@@ -73,7 +78,7 @@ narvisActivate st = do
   let token_text = pack token
   userFacingError <- runDiscord $ def
     { discordToken   = token_text
-    , discordOnEvent = eventHandler st
+    , discordOnEvent = void . runMaybeT . eventHandler st
     , discordOnLog   = \s -> TIO.putStrLn s >> TIO.putStrLn ""
     }
   TIO.putStrLn userFacingError
@@ -117,51 +122,67 @@ callDeepSeek systemPrompt ctx userPrompt = do
         _                        -> pure "narvis deactivated"
 
 
-eventHandler :: MVar LogMap -> Event -> DiscordHandler ()
+eventHandler :: MVar LogMap -> Event -> MaybeT DiscordHandler ()
 eventHandler st (MessageCreate m) = do
   unless (userIsBot $ messageAuthor m) $ do
     let ch   = messageChannelId m
         imgs = [ attachmentUrl a | a <- messageAttachments m ]
         msum = Msg (messageId m) (userName $ messageAuthor m) (messageContent m) imgs
-    liftIO $ logChat st ch msum
-    case findUrlAndGetEmbed (messageContent m) of
-      Just out -> void $ restCall (R.CreateMessage ch out)
-      Nothing  -> do
-        me <- restCall R.GetCurrentUser
-        case me of
-          Left _ -> pure ()
-          Right botUser -> do
-            when (isPing m) $ do
-              md <- liftIO $ getLastDeleted st ch
-              case md of
-                Just d  -> do
-                  let extra = if null (deleted_images d) then "" else "\n" <> T.intercalate "\n" (deleted_images d)
-                  void $ restCall (R.CreateMessage ch (T.concat [deleted_content d, " - ", deleted_author d, extra]))
-                Nothing -> void $ restCall (R.CreateMessage ch "troll")
 
-            case extractPromptAfterMention botUser m of
-              Nothing -> pure ()
-              Just promptText -> do
-                ctx <- liftIO $ getContext st ch
-                sysPrompt <- pack <$> liftIO (System.Environment.getEnv "NARVIS_PROMPT")
-                let replyFocus = case messageReferencedMessage m of
-                                   Just rm -> "\n(Replying to " <> userName (messageAuthor rm) <> ": " <> messageContent rm <> ")\n"
-                                   Nothing -> ""
-                    fullUserPrompt = replyFocus <> promptText
-                ans <- liftIO $ callDeepSeek sysPrompt ctx fullUserPrompt
-                void $ restCall (R.CreateMessage ch ans)
+    let say txt = void $ restCall (R.CreateMessage ch txt)
+
+    liftIO $ logChat st ch msum
+
+    -- Will only generate a message for these contexts
+    -- embeddable links > snipe command > narvis mention (deepseek call)
+    message <- embeddedLink <|> snipe ch <|> narvisMention ch
+
+    lift $ say message
+
+    where
+        eitherHelper :: Either a b -> MaybeT DiscordHandler b
+        eitherHelper (Left _)  = MaybeT $ pure Nothing
+        eitherHelper (Right x) = MaybeT $ pure (Just x)
+
+        embeddedLink :: MaybeT DiscordHandler Text
+        embeddedLink = MaybeT . pure $ findUrlAndGetEmbed (messageContent m)
+            
+        snipe :: ChannelId -> MaybeT DiscordHandler Text
+        snipe ch = do 
+            _ <- guard (snipeCommand m)
+            md <- MaybeT . liftIO $ getLastDeleted st ch
+            let extra = if null (deleted_images md) then "" else "\n" <> T.intercalate "\n" (deleted_images md)
+            return $ T.concat [deleted_content md, " - ", deleted_author md, extra]
+
+        narvisMention :: ChannelId -> MaybeT DiscordHandler Text
+        narvisMention ch = do
+            narvisHandle  <- eitherHelper =<< lift (restCall R.GetCurrentUser)
+            prompt        <- MaybeT . pure $ extractPromptAfterMention narvisHandle m
+            replyMessage  <- deepSeekCall ch prompt
+            MaybeT . pure $ Just replyMessage
+
+        deepSeekCall :: ChannelId -> Text -> MaybeT DiscordHandler Text
+        deepSeekCall ch promptText = do
+            ctx <- liftIO $ getContext st ch
+            sysPrompt <- pack <$> liftIO (System.Environment.getEnv "NARVIS_PROMPT")
+            let replyFocus = case messageReferencedMessage m of
+                                Just rm -> "\n(Replying to " <> userName (messageAuthor rm) <> ": " <> messageContent rm <> ")\n"
+                                Nothing -> ""
+                fullUserPrompt = replyFocus <> promptText
+            ans <- liftIO $ callDeepSeek sysPrompt ctx fullUserPrompt
+            MaybeT . pure $ Just ans
 
 eventHandler st (MessageDelete ch mid) = do
   hs <- liftIO $ getContext st ch
-  case find (\x -> msgId x == mid) (reverse hs) of
-    Just (Msg _ a c imgs) -> liftIO $ setLastDeleted st ch (Deleted a c imgs)
-    Nothing -> pure ()
+  (Msg _ a c imgs) <- MaybeT . pure $ find (\x -> msgId x == mid) (reverse hs)
+  liftIO $ setLastDeleted st ch (Deleted a c imgs)
+
 eventHandler st (MessageDeleteBulk ch mids) = do
   let midsL = toList mids
   hs <- liftIO $ getContext st ch
-  case find (\x -> msgId x `elem` midsL) (reverse hs) of
-    Just (Msg _ a c imgs) -> liftIO $ setLastDeleted st ch (Deleted a c imgs)
-    Nothing -> pure ()
+  (Msg _ a c imgs) <- MaybeT . pure $ find (\x -> msgId x `elem` midsL) (reverse hs)
+  liftIO $ setLastDeleted st ch (Deleted a c imgs)
+
 eventHandler _ _ = pure ()
 
 
@@ -178,8 +199,8 @@ extractPromptAfterMention me msg =
      else if T.isPrefixOf m2 t then restAfter m2
      else Nothing
 
-isPing :: Message -> Bool
-isPing = (== "/narvis snipe") . T.toCaseFold . T.strip . messageContent
+snipeCommand :: Message -> Bool
+snipeCommand = (== "/narvis snipe") . T.toCaseFold . T.strip . messageContent
 
 
 main :: IO ()
