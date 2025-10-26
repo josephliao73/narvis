@@ -45,4 +45,7 @@ findUrlAndGetEmbed :: Text -> Maybe Text
 findUrlAndGetEmbed input =
     case parse (manyTill anyChar (lookAhead parseUrl) >> parseUrl) "" input of
         Left _ -> Nothing
-        Right (Url uri _ domain path) -> Just $ uri <> convertDomain domain <> path
+        Right (Url uri _ domain path) -> 
+            if convertDomain domain /= domain 
+            then Just $ uri <> convertDomain domain <> path
+            else Nothing
