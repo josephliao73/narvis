@@ -21,6 +21,7 @@ import           Control.Lens ((^.), (.~), (&))
 import qualified Data.ByteString.Char8 as BS
 import           Data.Aeson (FromJSON(..), (.:), (.=), Value(..), object, withObject, eitherDecode)
 
+import          Embed (findUrlAndGetEmbed)
 
 data Msg = Msg {
     msgId   :: MessageId,
@@ -123,8 +124,7 @@ eventHandler st (MessageCreate m) = do
         imgs = [ attachmentUrl a | a <- messageAttachments m ]
         msum = Msg (messageId m) (userName $ messageAuthor m) (messageContent m) imgs
     liftIO $ logChat st ch msum
-
-    case transformFromMessage (messageContent m) of
+    case findUrlAndGetEmbed (messageContent m) of
       Just out -> void $ restCall (R.CreateMessage ch out)
       Nothing  -> do
         me <- restCall R.GetCurrentUser
@@ -180,54 +180,6 @@ extractPromptAfterMention me msg =
 
 isPing :: Message -> Bool
 isPing = (== "/narvis snipe") . T.toCaseFold . T.strip . messageContent
-
-
-transformFromMessage :: Text -> Maybe Text
-transformFromMessage t =
-  case [ u | w <- T.words t
-           , let u0 = stripAngles w
-           , Just u <- [transformOne u0]
-       ] of
-    (u:_) -> Just u
-    _     -> Nothing
-
-stripAngles :: Text -> Text
-stripAngles = T.dropWhile (== '<') . T.dropWhileEnd (== '>')
-
-transformOne :: Text -> Maybe Text
-transformOne url =
-  case splitUrl url of
-    Nothing -> Nothing
-    Just (scheme, host, rest) ->
-      case rewriteHostExact host of
-        Nothing     -> Nothing
-        Just host'  -> Just (scheme <> "://" <> host' <> rest)
-
-splitUrl :: Text -> Maybe (Text, Text, Text)
-splitUrl url =
-  let (sch, after) = T.breakOn "://" url
-  in if T.null after
-       then Nothing
-       else
-         let rest        = T.drop 3 after
-             (host, rok) = T.breakOn "/" rest
-         in if T.null host then Nothing else Just (sch, host, rok)
-
-eqCI :: Text -> Text -> Bool
-eqCI a b = T.toCaseFold a == T.toCaseFold b
-
--- todo have it work for old.reddit too 
-rewriteHostExact :: Text -> Maybe Text
-rewriteHostExact h
-  | eqCI h "instagram.com"      = Just "www.kkinstagram.com"
-  | eqCI h "www.instagram.com"  = Just "www.kkinstagram.com"
-  | eqCI h "reddit.com"         = Just "www.vxreddit.com"
-  | eqCI h "www.reddit.com"     = Just "www.vxreddit.com"
-  | eqCI h "twitter.com"        = Just "vxtwitter.com"
-  | eqCI h "www.twitter.com"    = Just "vxtwitter.com"
-  | eqCI h "x.com"              = Just "fixvx.com"
-  | eqCI h "www.x.com"          = Just "fixvx.com"
-  | otherwise                   = Nothing
 
 
 main :: IO ()
