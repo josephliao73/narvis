@@ -75,6 +75,8 @@ executable narvis
       , aeson
       , bytestring, lens
       , parsec
+      , mtl
+      , transformers
 
     hs-source-dirs:   src
 
